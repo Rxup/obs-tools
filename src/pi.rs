@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use crate::actions::Gesture;
 use crate::actions::text::{TEXT_ACTIONS, TEXT_KINDS};
 use crate::glyph_fit::FIT;
-use crate::i18n::DE;
+use crate::i18n::{DE, RU};
 use crate::icons::{COLORS, GLYPHS, MEDIA_GLYPHS, VOLUME_GLYPHS};
 
 pub const SHARED_JS: &str = "de.felitendo.obs-tools.sdPlugin/pi/lib/shared.js";
@@ -36,6 +36,7 @@ pub fn shared_js() -> String {
 	let glyphs: Map<String, Value> = GLYPHS.iter().map(|(name, body)| (name.to_string(), Value::from(body.as_str()))).collect();
 	let parts = [
 		("DE", pairs(DE)),
+		("RU", pairs(RU)),
 		("GLYPHS", Value::Object(glyphs)),
 		("FIT", Value::Object(fit)),
 		("COLORS", Value::Object(COLORS.iter().map(|(k, v)| (k.to_string(), Value::from(*v))).collect())),

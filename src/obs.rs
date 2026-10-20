@@ -115,12 +115,17 @@ pub struct ObsClient {
 	pub port: f64,
 	pub password: String,
 	pub name: String,
+	/// Streamlabs Desktop (port 59650 and a token), not obs-websocket.
+	streamlabs: bool,
+	pub(crate) slobs: RefCell<crate::streamlabs::Cache>,
 	status: Cell<Status>,
 	last_error: RefCell<String>,
 	version: RefCell<Option<Map<String, Value>>>,
 	ws: RefCell<Option<Socket>>,
 	pending: RefCell<HashMap<String, oneshot::Sender<Res<Value>>>>,
 	next_id: Cell<u64>,
+	/// The id of the Streamlabs auth call. 0 means none is waiting. Never 0 while waiting: Streamlabs treats 0 as a missing id.
+	auth_id: Cell<u64>,
 	serial: Cell<u64>,
 	retry: Cell<usize>,
 	retry_timer: RefCell<Option<Timer>>,
@@ -139,17 +144,26 @@ pub struct ObsClient {
 
 impl ObsClient {
 	pub fn new(host: &str, port: f64, password: &str, name: &str) -> Rc<Self> {
+		Self::with_protocol(host, port, password, name, false)
+	}
+
+	/// `streamlabs`: talk to Streamlabs Desktop instead of OBS.
+	pub fn with_protocol(host: &str, port: f64, password: &str, name: &str, streamlabs: bool) -> Rc<Self> {
+		let fallback = if streamlabs { 59650.0 } else { 4455.0 };
 		Rc::new_cyclic(|me| ObsClient {
 			host: host.to_string(),
-			port: crate::settings::or(port, 4455.0),
+			port: crate::settings::or(port, fallback),
 			password: password.to_string(),
 			name: name.to_string(),
+			streamlabs,
+			slobs: RefCell::new(crate::streamlabs::Cache::default()),
 			status: Cell::new(Status::Idle),
 			last_error: RefCell::new(String::new()),
 			version: RefCell::new(None),
 			ws: RefCell::new(None),
 			pending: RefCell::new(HashMap::new()),
 			next_id: Cell::new(1),
+			auth_id: Cell::new(0),
 			serial: Cell::new(0),
 			retry: Cell::new(0),
 			retry_timer: RefCell::new(None),
@@ -164,8 +178,18 @@ impl ObsClient {
 		})
 	}
 
-	fn rc(&self) -> Option<Rc<Self>> {
+	pub(crate) fn rc(&self) -> Option<Rc<Self>> {
 		self.me.upgrade()
+	}
+
+	pub(crate) fn is_streamlabs(&self) -> bool {
+		self.streamlabs
+	}
+
+	pub(crate) fn emit(&self, kind: &str, data: Value) {
+		let event = (kind.to_string(), data);
+		self.on_event.emit(&event);
+		self.on_typed.emit(&event);
 	}
 
 	pub fn status(&self) -> Status {
@@ -212,7 +236,7 @@ impl ObsClient {
 
 	pub fn url(&self) -> String {
 		let host = if self.host.contains(':') && !self.host.starts_with('[') { format!("[{}]", self.host) } else { self.host.clone() };
-		format!("ws://{host}:{}", fmt(self.port))
+		if self.streamlabs { format!("ws://{host}:{}/api/websocket", fmt(self.port)) } else { format!("ws://{host}:{}", fmt(self.port)) }
 	}
 
 	pub fn start(&self) {
@@ -286,6 +310,11 @@ impl ObsClient {
 		if self.stopped.get() {
 			return;
 		}
+		if self.streamlabs && self.password.is_empty() {
+			self.set_status(Status::Auth, "Streamlabs asks for a token");
+			self.schedule_retry();
+			return;
+		}
 		// While retrying, keep showing why the last try failed.
 		if !self.status.get().is_failure() {
 			self.set_status(Status::Connecting, "");
@@ -325,7 +354,9 @@ impl ObsClient {
 				return;
 			}
 		};
-		request.headers_mut().insert("Sec-WebSocket-Protocol", "obswebsocket.json".parse().expect("valid header"));
+		if !self.streamlabs {
+			request.headers_mut().insert("Sec-WebSocket-Protocol", "obswebsocket.json".parse().expect("valid header"));
+		}
 		let serial = self.serial.get() + 1;
 		self.serial.set(serial);
 		let (tx, rx) = mpsc::unbounded_channel();
@@ -335,6 +366,10 @@ impl ObsClient {
 	}
 
 	fn on_message(&self, serial: u64, attempt: &Attempt, text: &str) {
+		if self.streamlabs {
+			self.on_slobs_message(attempt, text);
+			return;
+		}
 		let Ok(message) = serde_json::from_str::<Value>(text) else { return };
 		let d = message.get("d").cloned().unwrap_or(Value::Null);
 		match message.get("op").and_then(Value::as_u64) {
@@ -466,6 +501,9 @@ impl ObsClient {
 	}
 
 	fn cleanup(&self, reason: &str) {
+		if self.streamlabs {
+			self.slobs.borrow_mut().clear();
+		}
 		let pending: Vec<_> = self.pending.borrow_mut().drain().collect();
 		for (_, sender) in pending {
 			let _ = sender.send(Err(format!("OBS not connected ({reason})").into()));
@@ -481,6 +519,95 @@ impl ObsClient {
 
 	fn send_raw(&self, message: &Value) -> bool {
 		self.send_message(Message::Text(js::stringify(message).into()))
+	}
+
+	pub(crate) fn send_rpc(&self, id: u64, method: &str, resource: &str, args: Value) -> bool {
+		self.send_raw(&serde_json::json!({
+			"jsonrpc": "2.0",
+			"id": id,
+			"method": method,
+			"params": { "resource": resource, "args": args }
+		}))
+	}
+
+	/// One Streamlabs JSON-RPC call. The id is a number, the pending key is that number as text.
+	pub(crate) fn rpc(&self, method: &str, resource: &str, args: Value) -> Reply {
+		let open = self.ws.borrow().as_ref().is_some_and(|s| s.open.get());
+		if !open {
+			return Box::pin(async { Err(Error::from("OBS not connected")) });
+		}
+		let id_num = self.alloc_id();
+		let id = id_num.to_string();
+		let (tx, rx) = oneshot::channel();
+		self.pending.borrow_mut().insert(id.clone(), tx);
+		self.send_rpc(id_num, method, resource, args);
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+		let me = self.me.clone();
+		Box::pin(async move {
+			match tokio::time::timeout_at(deadline, rx).await {
+				Ok(Ok(result)) => result,
+				Ok(Err(_)) => Err(Error::from("OBS not connected")),
+				Err(_) => {
+					if let Some(me) = me.upgrade() {
+						me.pending.borrow_mut().remove(&id);
+					}
+					Err(Error::from("OBS did not answer in time"))
+				}
+			}
+		})
+	}
+
+	fn on_slobs_message(&self, attempt: &Attempt, text: &str) {
+		let Ok(message) = serde_json::from_str::<Value>(text) else { return };
+		if let Some(id) = json_id(message.get("id")) {
+			if id != 0 && id == self.auth_id.get() {
+				self.auth_id.set(0);
+				if message.get("error").is_none() && message.get("result") != Some(&Value::Bool(false)) {
+					self.slobs_ready(attempt);
+				} else {
+					self.fail_slobs_auth(attempt, message.get("error"));
+				}
+				return;
+			}
+			let Some(pending) = self.pending.borrow_mut().remove(&id.to_string()) else { return };
+			let result = match message.get("error") {
+				Some(error) => Err(Error::from(crate::streamlabs::clean_error(error))),
+				None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+			};
+			let _ = pending.send(result);
+			return;
+		}
+		crate::streamlabs::on_event(self, &message);
+	}
+
+	fn slobs_ready(&self, attempt: &Attempt) {
+		if attempt.identified.get() {
+			return;
+		}
+		attempt.identified.set(true);
+		self.retry.set(0);
+		let mut version = Map::new();
+		version.insert("obs".into(), "Streamlabs".into());
+		version.insert("websocket".into(), "streamlabs".into());
+		version.insert("rpc".into(), 1.into());
+		*self.version.borrow_mut() = Some(version);
+		self.set_status(Status::Connected, "");
+		self.on_connected.emit(&());
+	}
+
+	fn fail_slobs_auth(&self, attempt: &Attempt, error: Option<&Value>) {
+		attempt.close_code.set(CLOSE_AUTH_FAILED);
+		let message = error.map(crate::streamlabs::clean_error).unwrap_or_default();
+		let message = if message.to_lowercase().contains("token") || message.is_empty() { "Wrong token" } else { &message };
+		*attempt.error.borrow_mut() = message.to_string();
+		self.send_message(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })));
+	}
+
+	/// The next JSON-RPC id. Skips 0, which Streamlabs reads as "no id".
+	fn alloc_id(&self) -> u64 {
+		let id = self.next_id.get().max(1);
+		self.next_id.set(id + 1);
+		id
 	}
 
 	fn send(&self, op: u64, mut d: Map<String, Value>, timeout: f64) -> Reply {
@@ -512,6 +639,9 @@ impl ObsClient {
 	}
 
 	pub fn call(&self, request_type: &str, request_data: Value) -> Reply {
+		if self.streamlabs {
+			return crate::streamlabs::call(self, request_type, request_data);
+		}
 		self.call_with_timeout(request_type, request_data, 10000.0)
 	}
 
@@ -524,6 +654,9 @@ impl ObsClient {
 
 	/// requests: [{ requestType, requestData }]. Resolves with the raw results.
 	pub fn batch(&self, requests: Vec<Value>, execution: BatchExecution, halt_on_failure: bool, timeout: Option<f64>) -> Reply<Vec<Value>> {
+		if self.streamlabs {
+			return crate::streamlabs::batch(self, requests);
+		}
 		let wait = timeout.unwrap_or_else(|| (requests.len() as f64 * 100.0).max(10000.0));
 		let mut d = Map::new();
 		d.insert("executionType".into(), (execution as u8).into());
@@ -537,6 +670,11 @@ impl ObsClient {
 			}
 		})
 	}
+}
+
+fn json_id(value: Option<&Value>) -> Option<u64> {
+	let value = value?;
+	value.as_u64().or_else(|| value.as_str().and_then(|text| text.parse().ok()))
 }
 
 fn obs_error(request_type: &Value, status: &Value) -> Error {
@@ -601,6 +739,11 @@ async fn run_socket(
 			}
 		}
 	});
+	if me.streamlabs {
+		let id = me.alloc_id();
+		me.auth_id.set(id);
+		me.send_rpc(id, "auth", "TcpServerService", serde_json::json!([me.password]));
+	}
 	let mut code = 1006;
 	let mut reason = String::new();
 	while let Some(message) = stream.next().await {

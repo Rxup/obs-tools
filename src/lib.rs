@@ -20,6 +20,7 @@ pub mod plugin;
 pub mod render;
 pub mod sd;
 pub mod settings;
+pub mod streamlabs;
 pub mod time;
 pub mod timers;
 pub mod twitch;

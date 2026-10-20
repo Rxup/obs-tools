@@ -21,7 +21,9 @@ fn pi_dir() -> PathBuf {
 
 /// Runs a module next to the settings page and returns its export `result` as JSON.
 fn run_js(code: &str) -> Value {
-	let dir = pi_dir();
+	// Canonicalize so the path matches the loader root. On Windows that root
+	// starts with \\?\, and a plain path then looks like it is outside it.
+	let dir = pi_dir().canonicalize().expect("pi folder");
 	let loader = Rc::new(SimpleModuleLoader::new(&dir).expect("pi folder"));
 	let mut context = Context::builder().module_loader(loader.clone()).build().expect("context");
 	let path = dir.join("__test.js");
@@ -276,7 +278,7 @@ fn settings_page_texts_match_the_plugin() {
 		import {{ formatVolume }} from "./lib/volume.js";
 		import {{ textUses }} from "./lib/text-gestures.js";
 		const out = [];
-		for (const lang of ["en", "de"]) {{
+		for (const lang of ["en", "de", "ru"]) {{
 			setLanguage(lang);
 			out.push({messages}.map((m) => translateMessage(m)));
 			out.push({numbers}.flatMap((n) => [num(n, 0), num(n, 1), num(n, 2), formatVolume(n), formatVolume(n, "percent")]));
@@ -289,7 +291,7 @@ fn settings_page_texts_match_the_plugin() {
 		numbers = serde_json::to_string(&numbers).unwrap_or_default(),
 	));
 	let mut expected = Vec::new();
-	for lang in ["en", "de"] {
+	for lang in ["en", "de", "ru"] {
 		i18n::set_language(lang);
 		expected.push(json!(messages.iter().map(|m| i18n::translate_message(m)).collect::<Vec<_>>()));
 		expected.push(json!(

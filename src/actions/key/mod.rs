@@ -251,7 +251,7 @@ impl Key {
 		if !c.custom_connection || host.is_empty() {
 			return None;
 		}
-		Some(Resolved { host: host.to_string(), port: settings::or(c.port, 4455.0), password: c.password })
+		Some(Resolved { host: host.to_string(), port: settings::or(c.port, 4455.0), password: c.password, protocol: "obs".into() })
 	}
 
 	/// The request is sent right away. Errors bubble up to safe(), which shows the alert.

@@ -30,7 +30,11 @@ fn host() -> Result<String> {
 }
 
 fn install_binary(built: &Path, target: &str) -> Result {
-	let to = plugin_dir().join(binary_path(target));
+	let mut rel = binary_path(target);
+	if built.extension().is_some_and(|ext| ext == "exe") {
+		rel.push_str(".exe");
+	}
+	let to = plugin_dir().join(rel);
 	if let Some(dir) = to.parent() {
 		fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 	}
@@ -45,7 +49,9 @@ pub fn build(targets: &[String]) -> Result {
 	if targets.is_empty() {
 		exec(Command::new("cargo").args(["build", "--release", "--package", "obs-tools"]).current_dir(root()))?;
 		let host = host()?;
-		return install_binary(&target_dir().join("release").join("obs-tools"), &host);
+		let dir = target_dir().join("release");
+		let built = if dir.join("obs-tools.exe").exists() { dir.join("obs-tools.exe") } else { dir.join("obs-tools") };
+		return install_binary(&built, &host);
 	}
 	for target in targets {
 		let zigbuild = Command::new("cargo")

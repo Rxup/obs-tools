@@ -1,5 +1,5 @@
 // Settings page for every OBS Tools action. The fields come from schemas.js.
-import { setLanguage, t, translateMessage } from "./lib/i18n.js";
+import { chooseLanguage, setLanguage, t, translateMessage } from "./lib/i18n.js";
 import { CONTROLS, LOOK, SCHEMAS } from "./schemas.js";
 
 const FIELD_LABELS = {
@@ -54,7 +54,8 @@ const ui = {
 
 window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent, info, actionInfo) => {
 	context = uuid;
-	document.documentElement.lang = setLanguage(JSON.parse(info || "{}").application?.language);
+	const appLanguage = JSON.parse(info || "{}").application?.language;
+	document.documentElement.lang = chooseLanguage(appLanguage, navigator.language);
 	const parsed = JSON.parse(actionInfo || "{}");
 	action = parsed.action;
 	schema = SCHEMAS[action] ?? { fields: [] };
@@ -105,6 +106,7 @@ function onMessage(message) {
 		pending.delete(payload.requestId);
 	}
 	if (payload.type === "state") {
+		if (payload.language) document.documentElement.lang = setLanguage(payload.language);
 		const wasConnected = conn?.connection?.status === "connected";
 		const first = !conn;
 		conn = payload;
@@ -384,26 +386,38 @@ function renderStatus() {
 	if (old) old.replaceWith(renderStatusCard());
 }
 
+function streamlabsMode(c) {
+	return (c?.protocol || conn?.global?.protocol) === "streamlabs";
+}
+
 function statusText() {
 	if (!conn) return { kind: "busy", title: t("Checking connection to OBS…") };
 	const c = conn.connection;
 	const where = `${c.host}:${c.port}`;
+	const slobs = streamlabsMode(c);
 	// The plugin sends its messages in English.
 	const error = c.error ? translateMessage(c.error) : "";
 	switch (c.status) {
 		case "connected": {
 			// All good: a quiet line, the details only on hover.
 			const detail = c.custom ? t("This key uses another PC") : "";
-			return { kind: "ok", quiet: true, title: t("Connected to OBS {version}", { version: c.version?.obs ?? "" }).replace(/\s+/g, " ").trim(), hint: where, detail };
+			const title = slobs
+				? t("Connected to Streamlabs")
+				: t("Connected to OBS {version}", { version: c.version?.obs ?? "" }).replace(/\s+/g, " ").trim();
+			return { kind: "ok", quiet: true, title, hint: where, detail };
 		}
 		case "auth":
-			return { kind: "warn", title: t(c.error?.includes("asks") ? "OBS asks for a password" : "Wrong password"), hint: t("{where} · check the password below", { where }) };
+			return slobs
+				? { kind: "warn", title: t(c.error?.includes("asks") ? "Streamlabs asks for a token" : "Wrong token"), hint: t("{where} · check the token below", { where }) }
+				: { kind: "warn", title: t(c.error?.includes("asks") ? "OBS asks for a password" : "Wrong password"), hint: t("{where} · check the password below", { where }) };
 		case "offline":
-			return { kind: "bad", title: t("OBS is not reachable"), hint: t("{error}. Is OBS running with the WebSocket server on?", { error: error || where }) };
+			return slobs
+				? { kind: "bad", title: t("Streamlabs is not reachable"), hint: t("{error}. Is Streamlabs running with remote control on?", { error: error || where }) }
+				: { kind: "bad", title: t("OBS is not reachable"), hint: t("{error}. Is OBS running with the WebSocket server on?", { error: error || where }) };
 		case "error":
 			return { kind: "bad", title: t("OBS error"), hint: error || where };
 		default:
-			return { kind: "warn busy", title: t("Connecting to OBS…"), hint: where };
+			return { kind: "warn busy", title: t(slobs ? "Connecting to Streamlabs…" : "Connecting to OBS…"), hint: where };
 	}
 }
 
@@ -446,7 +460,20 @@ function renderStatusCard() {
 }
 
 // Only needed while there is no connection.
-function renderGuide() {
+function renderGuide(slobs) {
+	if (slobs) {
+		return [
+			h("div", { class: "box-title" }, t("How to connect Streamlabs")),
+			h(
+				"ol",
+				{ class: "steps" },
+				h("li", {}, t("In Streamlabs Desktop, open Settings → Remote control and turn it on.")),
+				h("li", {}, t("Copy the IP, the port and the token into the fields below.")),
+				h("li", {}, t("Both PCs have to be on the same network.")),
+			),
+			h("p", { class: "note" }, t("The status at the top turns green as soon as the connection works.")),
+		];
+	}
 	return [
 		h("div", { class: "box-title" }, t("How to connect OBS")),
 		h(
@@ -462,26 +489,44 @@ function renderGuide() {
 }
 
 function renderSetup() {
-	const g = conn?.global ?? { host: "127.0.0.1", port: 4455 };
-	const draft = (ui.setupDraft ??= { host: g.host, port: g.port, password: null });
+	const g = conn?.global ?? { host: "127.0.0.1", port: 4455, protocol: "obs" };
+	const draft = (ui.setupDraft ??= { host: g.host, port: g.port, password: null, protocol: g.protocol || "obs" });
+	const slobs = draft.protocol === "streamlabs";
 	const field = (key, attrs) =>
 		h("input", {
 			...attrs,
 			"data-focus-key": `setup-${key}`,
 			oninput: (e) => (draft[key] = e.target.value),
 		});
+	const protocol = dropdown({
+		value: draft.protocol || "obs",
+		focusKey: "setup-protocol",
+		options: [
+			{ value: "obs", label: "OBS Studio" },
+			{ value: "streamlabs", label: t("Streamlabs Desktop") },
+		],
+		onChange: (value) => {
+			const previous = draft.protocol || "obs";
+			draft.protocol = value;
+			const port = Number(draft.port);
+			if (value === "streamlabs" && previous !== "streamlabs" && (!port || port === 4455)) draft.port = 59650;
+			if (value === "obs" && previous === "streamlabs" && port === 59650) draft.port = 4455;
+			render();
+		},
+	});
 	return h(
 		"section",
 		{ class: "connection" },
-		conn?.connection?.status === "connected" ? null : renderGuide(),
+		conn?.connection?.status === "connected" ? null : renderGuide(slobs),
 		// Text, checkboxes and messages line up with the fields.
 		row("", h("div", { class: "note" }, t("These settings apply to all OBS Tools actions."))),
-		row("", h("div", { class: "buttons" }, h("button", { class: "btn", onclick: readLocalObs }, t("Read port and password from OBS")))),
+		row(t("Software"), protocol),
+		slobs ? null : row("", h("div", { class: "buttons" }, h("button", { class: "btn", onclick: readLocalObs }, t("Read port and password from OBS")))),
 		ui.localMsg ? row("", msg(ui.localMsg)) : null,
-		row(t("Host"), field("host", { type: "text", value: draft.host ?? "", placeholder: "127.0.0.1" })),
-		row(t("Port"), field("port", { type: "number", value: draft.port, min: 1, max: 65535 })),
+		row(t("Host"), field("host", { type: "text", value: draft.host ?? "", placeholder: slobs ? "192.168.1.20" : "127.0.0.1" })),
+		row(t("Port"), field("port", { type: "number", value: draft.port, min: 1, max: 65535, placeholder: slobs ? "59650" : "4455" })),
 		row(
-			t("Password"),
+			t(slobs ? "Token" : "Password"),
 			field("password", {
 				type: "password",
 				value: draft.password ?? "",
@@ -505,7 +550,13 @@ function renderSetup() {
 
 function setupPayload() {
 	const d = ui.setupDraft;
-	return { host: d.host, port: Number(d.port) || 4455, password: d.password === "" && conn?.global?.hasPassword ? null : d.password };
+	const slobs = d.protocol === "streamlabs";
+	return {
+		host: d.host,
+		port: Number(d.port) || (slobs ? 59650 : 4455),
+		protocol: slobs ? "streamlabs" : "obs",
+		password: d.password === "" && conn?.global?.hasPassword ? null : d.password,
+	};
 }
 
 // Reads the OBS settings file on this PC, but only when the user clicks the button.

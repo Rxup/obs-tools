@@ -18,7 +18,7 @@ use crate::timers::{Timer, set_timeout};
 const IDLE_STOP_DELAY: f64 = 30000.0;
 
 pub fn default_global() -> Map<String, Value> {
-	match crate::obj! { "host" => "127.0.0.1", "port" => 4455, "password" => "" } {
+	match crate::obj! { "host" => "127.0.0.1", "port" => 4455, "password" => "", "protocol" => "obs" } {
 		Value::Object(map) => map,
 		_ => Map::new(),
 	}
@@ -78,6 +78,16 @@ pub struct Resolved {
 	pub host: String,
 	pub port: f64,
 	pub password: String,
+	/// "obs" or "streamlabs".
+	pub protocol: String,
+}
+
+pub fn protocol_name(protocol: &str) -> &'static str {
+	if protocol == "streamlabs" { "streamlabs" } else { "obs" }
+}
+
+pub fn default_port(protocol: &str) -> f64 {
+	if protocol_name(protocol) == "streamlabs" { 59650.0 } else { 4455.0 }
 }
 
 /// The OBS of the setup, as the global settings keep it.
@@ -87,16 +97,23 @@ pub struct Global {
 	pub host: String,
 	pub port: f64,
 	pub password: String,
+	pub protocol: String,
 }
 
 /// Turns the saved settings into the host, port and password to use.
 pub fn resolve_connection(g: &Global) -> Resolved {
 	let host = if g.host.is_empty() { "127.0.0.1" } else { &g.host };
-	Resolved { host: js::trim(host).to_string(), port: settings::or(g.port, 4455.0), password: g.password.clone() }
+	let protocol = protocol_name(&g.protocol).to_string();
+	Resolved {
+		host: js::trim(host).to_string(),
+		port: settings::or(g.port, default_port(&protocol)),
+		password: g.password.clone(),
+		protocol,
+	}
 }
 
 pub fn connection_key(c: &Resolved) -> String {
-	format!("{}|{}|{}", c.host.to_lowercase(), fmt(c.port), c.password)
+	format!("{}|{}|{}|{}", c.protocol, c.host.to_lowercase(), fmt(c.port), c.password)
 }
 
 struct Entry {
@@ -218,7 +235,8 @@ impl ConnectionManager {
 		let entry = match existing {
 			Some(entry) => entry,
 			None => {
-				let client = ObsClient::new(&resolved.host, resolved.port, &resolved.password, &key);
+				let client =
+					ObsClient::with_protocol(&resolved.host, resolved.port, &resolved.password, &key, resolved.protocol == "streamlabs");
 				let state = ObsState::new(client.clone());
 				let weak = self.me.clone();
 				let (host, port) = (resolved.host.clone(), resolved.port);
@@ -250,7 +268,7 @@ impl ConnectionManager {
 
 	/// Used by the setup page to try settings before saving them.
 	pub async fn test(&self, config: &Resolved, timeout_ms: u64) -> TestResult {
-		let client = ObsClient::new(&config.host, config.port, &config.password, "test");
+		let client = ObsClient::with_protocol(&config.host, config.port, &config.password, "test", config.protocol == "streamlabs");
 		let (tx, rx) = tokio::sync::oneshot::channel::<TestResult>();
 		let tx = RefCell::new(Some(tx));
 		let weak = Rc::downgrade(&client);
@@ -298,13 +316,17 @@ mod tests {
 		let r = |v| resolve_connection(&settings::read(&map(v)));
 		assert_eq!(
 			r(json!({ "host": " localhost ", "password": "typed" })),
-			Resolved { host: "localhost".into(), port: 4455.0, password: "typed".into() }
+			Resolved { host: "localhost".into(), port: 4455.0, password: "typed".into(), protocol: "obs".into() }
 		);
 		assert_eq!(
 			r(json!({ "host": "192.168.1.5", "port": "4460" })),
-			Resolved { host: "192.168.1.5".into(), port: 4460.0, password: "".into() }
+			Resolved { host: "192.168.1.5".into(), port: 4460.0, password: "".into(), protocol: "obs".into() }
 		);
-		assert_eq!(r(json!({})), Resolved { host: "127.0.0.1".into(), port: 4455.0, password: "".into() });
+		assert_eq!(r(json!({})), Resolved { host: "127.0.0.1".into(), port: 4455.0, password: "".into(), protocol: "obs".into() });
+		assert_eq!(
+			r(json!({ "protocol": "streamlabs", "host": "192.168.2.71" })),
+			Resolved { host: "192.168.2.71".into(), port: 59650.0, password: "".into(), protocol: "streamlabs".into() }
+		);
 	}
 
 	#[test]

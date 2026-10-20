@@ -25,6 +25,8 @@ const AUDIO_KINDS: &[&str] = &[
 	"ffmpeg_source",
 	"vlc_source",
 	"browser_source",
+	"dshow_input",
+	"game_capture",
 ];
 
 /// What some lists need to know, from the settings page.

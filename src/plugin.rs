@@ -9,9 +9,11 @@ use tokio::task::spawn_local;
 
 use crate::actions::{Appearance, Controller, Key, KeyRc, Kind, PiReply};
 use crate::connections::{
-	ConnectionManager, Global, Resolved, connection_key, default_global, local_config_paths, read_local_obs_config, resolve_connection,
+	ConnectionManager, Global, Resolved, connection_key, default_global, default_port, local_config_paths, protocol_name,
+	read_local_obs_config, resolve_connection,
 };
 use crate::desktop::{pick_file, pick_folder, session_type};
+use crate::i18n;
 use crate::js::{self, truthy};
 use crate::lists::lists;
 use crate::obs::Status;
@@ -291,13 +293,22 @@ impl Plugin {
 				"version": client.as_ref().and_then(|c| c.version()).unwrap_or(Value::Null),
 				"host": client.as_ref().map_or(resolved.host, |c| c.host.clone()),
 				"port": js::num(client.as_ref().map_or(resolved.port, |c| c.port)),
+				"protocol": if client.as_ref().is_some_and(|c| c.is_streamlabs()) {
+					"streamlabs"
+				} else if client.is_some() {
+					"obs"
+				} else {
+					resolved.protocol.as_str()
+				},
 				"custom": instance.as_ref().is_some_and(|i| i.connection_config().is_some()),
 			},
 			"global": {
 				"host": global.get("host").cloned().unwrap_or(Value::Null),
 				"port": global.get("port").cloned().unwrap_or(Value::Null),
+				"protocol": global.get("protocol").cloned().unwrap_or(Value::from("obs")),
 				"hasPassword": truthy(global.get("password")),
 			},
+			"language": i18n::language(),
 			"twitch": self.twitch.status(),
 			"session": session_type(),
 			"settings": instance.as_ref().map_or(Value::Null, |i| Value::Object(i.settings_map())),
@@ -364,9 +375,11 @@ impl Plugin {
 				let c = m.settings;
 				let host = c.host.unwrap_or_default();
 				let host = js::trim(&host);
+				let protocol = protocol_name(c.protocol.as_deref().unwrap_or("obs"));
 				let mut patch = Map::new();
 				patch.insert("host".into(), if host.is_empty() { "127.0.0.1" } else { host }.into());
-				patch.insert("port".into(), js::num(settings::or(c.port.unwrap_or(0.0), 4455.0)));
+				patch.insert("port".into(), js::num(settings::or(c.port.unwrap_or(0.0), default_port(protocol))));
+				patch.insert("protocol".into(), protocol.into());
 				if let Some(password) = c.password {
 					patch.insert("password".into(), password.into());
 				}
@@ -383,6 +396,7 @@ impl Plugin {
 						("host", "127.0.0.1".into()),
 						("port", js::num(local.port)),
 						("password", password.into()),
+						("protocol", "obs".into()),
 					]));
 					self.reconnect_default();
 				}
@@ -497,17 +511,19 @@ struct ConnectionFields {
 	host: Option<String>,
 	port: Option<f64>,
 	password: Option<String>,
+	protocol: Option<String>,
 }
 
 /// Where testConnection connects to: what the user typed, the saved settings for the rest. direct: as
 /// typed (a key with its own OBS), else resolved like the saved settings.
 fn test_target(given: ConnectionFields, direct: bool, saved: Global) -> Resolved {
 	let password = given.password.unwrap_or(saved.password);
+	let protocol = protocol_name(given.protocol.as_deref().unwrap_or(&saved.protocol)).to_string();
 	let (host, port) = (given.host.unwrap_or(saved.host), given.port.unwrap_or(saved.port));
 	if direct {
-		Resolved { host, port: settings::or(port, 4455.0), password }
+		Resolved { host, port: settings::or(port, default_port(&protocol)), password, protocol }
 	} else {
-		resolve_connection(&Global { host, port, password })
+		resolve_connection(&Global { host, port, password, protocol })
 	}
 }
 
@@ -522,9 +538,10 @@ mod tests {
 
 	#[test]
 	fn a_connection_test_takes_what_was_typed_and_the_saved_rest() {
-		let saved = || Global { host: "10.0.0.2".into(), port: 4460.0, password: "saved".into() };
+		let saved = || Global { host: "10.0.0.2".into(), port: 4460.0, password: "saved".into(), protocol: "obs".into() };
 		let typed = |v: Value| settings::read_value::<Message>(&json!({ "type": "testConnection", "settings": v })).settings;
-		let r = |host: &str, port: f64, password: &str| Resolved { host: host.into(), port, password: password.into() };
+		let r =
+			|host: &str, port: f64, password: &str| Resolved { host: host.into(), port, password: password.into(), protocol: "obs".into() };
 		// The setup page: null keeps the saved password, an empty host is this PC.
 		assert_eq!(
 			test_target(typed(json!({ "host": "", "port": 4455, "password": null })), false, saved()),

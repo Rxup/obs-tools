@@ -1,21 +1,34 @@
 // Translations for the settings pages. The code is written in English. t() looks the English text
 // up and falls back to it. The German texts are in src/i18n/de.rs, `cargo xtask manifest` copies them
-// into shared.js. Keep this file like src/i18n.rs.
-import { DE } from "./shared.js";
+// into shared.js, next to the Russian ones. Keep this file like src/i18n.rs.
+import { DE, RU } from "./shared.js";
 
-export const LANGUAGES = { de: DE };
+export const LANGUAGES = { de: DE, ru: RU };
 // Languages that write 1,5 instead of 1.5.
-const DECIMAL_COMMA = new Set(["de"]);
+const DECIMAL_COMMA = new Set(["de", "ru"]);
 
 let current = {};
 let comma = false;
 
+function primary(code) {
+	return String(code ?? "").toLowerCase().split(/[-_]/)[0];
+}
+
 // OpenDeck sends codes like "de" or "zh_CN".
 export function setLanguage(code) {
-	const lang = String(code ?? "").toLowerCase().split(/[-_]/)[0];
+	const lang = primary(code);
 	current = LANGUAGES[lang] ?? {};
 	comma = DECIMAL_COMMA.has(lang);
 	return lang in LANGUAGES ? lang : "en";
+}
+
+// Same choice as choose_language in src/i18n.rs. English in OpenDeck is the default, and Russian
+// is not in its list, so a Russian PC still gets Russian.
+export function chooseLanguage(app, system) {
+	const lang = primary(app);
+	if (lang === "de" || lang === "ru") return setLanguage(lang);
+	if (lang === "en") return setLanguage(primary(system));
+	return setLanguage("en");
 }
 
 // t("Phase {n}", { n: 2 }) -> "Phase 2" (or the translation, with {n} filled in).

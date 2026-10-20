@@ -2,34 +2,98 @@
 // in the table of the language and falls back to it. The settings pages translate the messages the
 // plugin sends them, see translate_message.
 mod de;
+mod ru;
 
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
 pub use de::DE;
+pub use ru::{RU, RU_ACTIONS};
 
 static DE_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| DE.iter().copied().collect());
+static RU_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| RU.iter().copied().collect());
+
+#[derive(Clone, Copy, PartialEq)]
+enum Lang {
+	En,
+	De,
+	Ru,
+}
 
 // The plugin runs on one thread. Per thread, so tests in other languages do not get in the way.
 thread_local! {
-	static GERMAN: Cell<bool> = const { Cell::new(false) };
+	static LANG: Cell<Lang> = const { Cell::new(Lang::En) };
 	// Languages that write 1,5 instead of 1.5.
 	static COMMA: Cell<bool> = const { Cell::new(false) };
 }
 
-/// OpenDeck sends codes like "de" or "zh_CN". Returns the language used: "de" or "en".
+/// OpenDeck sends codes like "de", "ru" or "zh_CN". Returns the language used: "de", "ru" or "en".
 pub fn set_language(code: &str) -> &'static str {
-	let lang = code.to_lowercase();
-	let lang = lang.split(['-', '_']).next().unwrap_or("");
-	let german = lang == "de";
-	GERMAN.set(german);
-	COMMA.set(german);
-	if german { "de" } else { "en" }
+	let (which, name) = match primary(code).as_str() {
+		"de" => (Lang::De, "de"),
+		"ru" => (Lang::Ru, "ru"),
+		_ => (Lang::En, "en"),
+	};
+	LANG.set(which);
+	COMMA.set(which != Lang::En);
+	name
+}
+
+/// OpenDeck's own language list has no Russian. English there is the default, so a Russian
+/// Windows still gets Russian. Deutsch and an explicit Russian stay as chosen.
+pub fn choose_language(app: &str, system: &str) -> &'static str {
+	match primary(app).as_str() {
+		"de" | "ru" => set_language(app),
+		"en" => set_language(&primary(system)),
+		_ => set_language("en"),
+	}
+}
+
+fn primary(code: &str) -> String {
+	code.to_lowercase().split(['-', '_']).next().unwrap_or("").to_string()
+}
+
+/// The language of this PC, like "ru-RU".
+pub fn system_language() -> String {
+	#[cfg(windows)]
+	{
+		#[link(name = "kernel32")]
+		unsafe extern "system" {
+			fn GetUserDefaultLocaleName(name: *mut u16, size: i32) -> i32;
+		}
+		let mut buf = [0u16; 85];
+		let n = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+		if n > 1 { String::from_utf16_lossy(&buf[..n as usize - 1]) } else { String::new() }
+	}
+	#[cfg(not(windows))]
+	{
+		std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")).unwrap_or_default()
+	}
+}
+
+/// "de", "ru" or "en". Does not change the language.
+pub fn language() -> &'static str {
+	match LANG.get() {
+		Lang::De => "de",
+		Lang::Ru => "ru",
+		Lang::En => "en",
+	}
 }
 
 fn table() -> Option<&'static HashMap<&'static str, &'static str>> {
-	if GERMAN.get() { Some(&DE_MAP) } else { None }
+	match LANG.get() {
+		Lang::De => Some(&DE_MAP),
+		Lang::Ru => Some(&RU_MAP),
+		Lang::En => None,
+	}
+}
+
+fn rows() -> &'static [(&'static str, &'static str)] {
+	match LANG.get() {
+		Lang::Ru => RU,
+		_ => DE,
+	}
 }
 
 /// The text in the current language.
@@ -134,7 +198,7 @@ pub fn translate_message(message: &str) -> String {
 	if let Some(text) = table.get(message) {
 		return text.to_string();
 	}
-	for (text, _) in DE {
+	for (text, _) in rows() {
 		if !text.contains('{') {
 			continue;
 		}
@@ -166,20 +230,40 @@ mod tests {
 		set_language("en");
 		assert_eq!(num(6.43, 1), "6.4");
 		assert_eq!(t("Wrong password"), "Wrong password");
+		assert_eq!(set_language("ru_RU"), "ru");
+		assert_eq!(t("Wrong token"), "Неверный токен");
+		assert_eq!(num(6.43, 1), "6,4");
+		assert_eq!(choose_language("en", "ru-RU"), "ru");
+		assert_eq!(choose_language("de", "ru-RU"), "de");
+		assert_eq!(choose_language("en", "en-US"), "en");
+		assert_eq!(choose_language("uk", "ru-RU"), "en");
 	}
 
 	#[test]
 	fn table_has_no_text_twice_and_keeps_placeholders() {
-		let mut seen = HashSet::new();
-		for (en, de) in DE {
-			assert!(seen.insert(en), "listed twice: {en}");
-			let holes = |text: &str| {
-				let mut names: Vec<String> =
-					parts(text).into_iter().filter_map(|p| if let Part::Hole(n) = p { Some(n) } else { None }).collect();
-				names.sort();
-				names
-			};
-			assert_eq!(holes(en), holes(de), "placeholders differ: {en}");
+		for table in [DE, RU] {
+			let mut seen = HashSet::new();
+			for (en, translated) in table {
+				assert!(seen.insert(*en), "listed twice: {en}");
+				assert_eq!(holes(en), holes(translated), "placeholders differ: {en}");
+			}
 		}
+		let german: HashSet<&str> = DE.iter().map(|(en, _)| *en).collect();
+		let russian: HashSet<&str> = RU.iter().map(|(en, _)| *en).collect();
+		assert_eq!(german, russian);
+		let mut actions = HashSet::new();
+		for (id, name, tip) in RU_ACTIONS {
+			assert!(actions.insert(*id), "action listed twice: {id}");
+			assert!(!name.is_empty() && !tip.is_empty(), "empty Russian name: {id}");
+		}
+		for action in crate::manifest::ACTIONS {
+			assert!(actions.contains(action.id), "no Russian name: {}", action.id);
+		}
+	}
+
+	fn holes(text: &str) -> Vec<String> {
+		let mut names: Vec<String> = parts(text).into_iter().filter_map(|p| if let Part::Hole(n) = p { Some(n) } else { None }).collect();
+		names.sort();
+		names
 	}
 }

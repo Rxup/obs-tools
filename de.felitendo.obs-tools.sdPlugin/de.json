@@ -1,6 +1,6 @@
 {
 	"Name": "OBS Tools",
-	"Description": "Erweiterte OBS-Werkzeuge für OpenDeck unter Linux: smarter Szenenwechsel mit Vorschau, Quellen-Animationen, Instant Replay, Videoplayer, Alarm bei Frame-Verlust und mehr.",
+	"Description": "Erweiterte OBS-Werkzeuge für OpenDeck: Szenen, Stream, Quellen und mehr. Steuert auch Streamlabs Desktop auf einem anderen PC.",
 	"de.felitendo.obs-tools.recordtoggle": {
 		"Name": "Aufnahme an/aus",
 		"Tooltip": "Aufnahme starten, stoppen oder pausieren, auf diesem PC oder in einem anderen OBS im Netzwerk."

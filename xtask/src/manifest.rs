@@ -1,4 +1,4 @@
-// Builds manifest.json and the translated names (de.json) from src/manifest.rs, and pi/lib/shared.js.
+// Builds manifest.json, the translated names (de.json, ru.json) and pi/lib/shared.js.
 use obs_tools::manifest::{ACTIONS, ActionDef, ID};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -56,49 +56,68 @@ fn action(a: &ActionDef) -> Value {
 
 pub fn manifest() -> Value {
 	let version = std::fs::read_to_string(root().join("VERSION")).unwrap_or_default().trim().to_string();
-	let code_paths: Map<String, Value> = TARGETS.iter().map(|t| (t.to_string(), binary_path(t).into())).collect();
+	let mut code_paths: Map<String, Value> = TARGETS.iter().map(|t| (t.to_string(), binary_path(t).into())).collect();
+	code_paths.insert("x86_64-pc-windows-msvc".into(), "bin/x86_64-pc-windows-msvc/obs-tools.exe".into());
 	json!({
 		"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
 		"UUID": ID,
 		"Name": "OBS Tools",
 		"Version": version,
 		"Author": "Felitendo",
-		"Description": "Advanced OBS tools for OpenDeck on Linux: smart scene switching with previews, source animations, instant replay, video player, dropped frame alarm and more.",
+		"Description": "Advanced OBS tools for OpenDeck: scenes, streaming, sources and more. Also controls Streamlabs Desktop on another PC.",
 		"URL": "https://github.com/FeloDeck/obs-tools",
 		"Icon": "images/plugin",
 		"Category": "OBS Tools",
 		"CategoryIcon": "images/category",
 		// OpenDeck picks the binary for its CPU from CodePaths. Older versions take CodePath.
 		"CodePath": binary_path(TARGETS[0]),
+		"CodePathWin": "bin/x86_64-pc-windows-msvc/obs-tools.exe",
 		"CodePaths": code_paths,
 		"PropertyInspectorPath": "pi/index.html",
 		"SDKVersion": 2,
-		"OS": [{ "Platform": "linux" }],
+		"OS": [{ "Platform": "linux" }, { "Platform": "windows", "MinimumVersion": "10" }],
 		"Actions": ACTIONS.iter().map(action).collect::<Vec<_>>(),
 	})
 }
 
-fn localized() -> Value {
+fn localized(description: &str, name_of: impl Fn(&ActionDef) -> (String, String)) -> Value {
 	let mut out = Map::new();
 	out.insert("Name".into(), "OBS Tools".into());
-	out.insert(
-		"Description".into(),
-		"Erweiterte OBS-Werkzeuge für OpenDeck unter Linux: smarter Szenenwechsel mit Vorschau, Quellen-Animationen, Instant Replay, Videoplayer, Alarm bei Frame-Verlust und mehr.".into(),
-	);
+	out.insert("Description".into(), description.into());
 	for a in ACTIONS {
-		out.insert(format!("{ID}.{}", a.id), json!({ "Name": a.de_name, "Tooltip": a.de_tooltip }));
+		let (name, tooltip) = name_of(a);
+		out.insert(format!("{ID}.{}", a.id), json!({ "Name": name, "Tooltip": tooltip }));
 	}
 	Value::Object(out)
+}
+
+fn russian(action: &ActionDef) -> (&'static str, &'static str) {
+	obs_tools::i18n::RU_ACTIONS
+		.iter()
+		.find(|row| row.0 == action.id)
+		.map(|row| (row.1, row.2))
+		.unwrap_or_else(|| panic!("no Russian name for {}", action.id))
 }
 
 pub fn run() -> Result {
 	let dir = plugin_dir();
 	let manifest = manifest();
 	write(&dir.join("manifest.json"), pretty(&manifest) + "\n")?;
-	write(&dir.join("de.json"), pretty(&localized()) + "\n")?;
+	let german =
+		"Erweiterte OBS-Werkzeuge für OpenDeck: Szenen, Stream, Quellen und mehr. Steuert auch Streamlabs Desktop auf einem anderen PC.";
+	let russian_text =
+		"Инструменты OBS для OpenDeck: сцены, стрим, источники и другое. Управляет и Streamlabs Desktop на другом компьютере.";
+	write(&dir.join("de.json"), pretty(&localized(german, |a| (a.de_name.to_string(), a.de_tooltip.to_string()))) + "\n")?;
+	write(
+		&dir.join("ru.json"),
+		pretty(&localized(russian_text, |a| {
+			let (name, tooltip) = russian(a);
+			(name.to_string(), tooltip.to_string())
+		})) + "\n",
+	)?;
 	write(&root().join(obs_tools::pi::SHARED_JS), obs_tools::pi::shared_js())?;
 	println!(
-		"manifest.json and de.json: {} actions, version {}; pi/lib/shared.js",
+		"manifest.json, de.json and ru.json: {} actions, version {}; pi/lib/shared.js",
 		ACTIONS.len(),
 		manifest["Version"].as_str().unwrap_or("")
 	);

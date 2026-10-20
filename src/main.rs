@@ -193,7 +193,8 @@ fn main() {
 	let flag = |name: &str| args.iter().position(|a| a.trim().to_lowercase() == name).and_then(|i| args.get(i + 1)).cloned();
 	let info: Value = flag("-info").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
 	let uuid = flag("-pluginuuid").unwrap_or_default();
-	let language = i18n::set_language(info.pointer("/application/language").and_then(Value::as_str).unwrap_or(""));
+	let app_language = info.pointer("/application/language").and_then(Value::as_str).unwrap_or("");
+	let language = i18n::choose_language(app_language, &i18n::system_language());
 	let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
 	std::panic::set_hook(Box::new(|panic| log(&format!("uncaught: {panic}"))));
 
