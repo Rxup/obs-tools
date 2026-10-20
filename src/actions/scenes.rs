@@ -46,6 +46,9 @@ fn stop_preview(k: &KeyRc) {
 
 fn start_preview(k: &KeyRc) {
 	stop_preview(k);
+	if k.obs().is_some_and(|client| client.is_streamlabs()) {
+		return;
+	}
 	let s: SceneSettings = k.settings();
 	if s.show_preview && s.preview_interval > 0.0 {
 		let stop = k.interval((s.preview_interval * 1000.0).max(500.0), |k| {
@@ -59,6 +62,9 @@ fn start_preview(k: &KeyRc) {
 }
 
 async fn refresh_shot(k: &KeyRc) {
+	if k.obs().is_some_and(|client| client.is_streamlabs()) {
+		return;
+	}
 	let s: SceneSettings = k.settings();
 	if !k.visible() || !k.online() || s.scene.is_empty() || !s.show_preview {
 		return;
@@ -84,6 +90,10 @@ fn scene_title(s: &SceneSettings) -> String {
 impl Behavior for SmartScene {
 	async fn on_connected(&self, k: &KeyRc) -> Res<()> {
 		scene(k).shot = None;
+		// Streamlabs has no source screenshot. Waiting for that call kept the key on the offline picture.
+		if k.obs().is_some_and(|client| client.is_streamlabs()) {
+			return Ok(());
+		}
 		start_preview(k);
 		refresh_shot(k).await;
 		Ok(())
@@ -131,6 +141,10 @@ impl Behavior for SmartScene {
 		let data = k.data();
 		let name = Some(s.scene.as_str()).filter(|n| !n.is_empty());
 		let live = name.is_some() && data.program_scene.as_deref() == name;
+		// The first draw can run before the scene list. Skip it, or that plain picture stays on the key.
+		if k.online() && data.program_scene.is_none() {
+			return;
+		}
 		let preview = name.is_some() && data.studio_mode && data.preview_scene.as_deref() == name;
 		let border = if live {
 			Some(if is_color(&s.live_color) { s.live_color.as_str() } else { colors::RED })
@@ -184,7 +198,7 @@ pub static SMART_SCENE: Kind = Kind {
 			"showPreview": true,
 			"previewFit": "fit",
 			"previewInterval": 2,
-			"liveColor": colors::RED,
+			"liveColor": colors::AMBER,
 			"previewColor": colors::GREEN,
 		}))
 	},

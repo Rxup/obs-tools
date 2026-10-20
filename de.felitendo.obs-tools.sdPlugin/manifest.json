@@ -78,7 +78,7 @@
 			"UUID": "de.felitendo.obs-tools.smartscene",
 			"Name": "Smart Scene Switcher",
 			"Icon": "images/actions/scene",
-			"Tooltip": "Switch scenes. In studio mode: first press to preview, second press to go live. Shows a live picture with a red (live) or green (preview) frame.",
+			"Tooltip": "Switch scenes. In studio mode: first press to preview, second press to go live. Shows a live picture with a yellow (live) or green (preview) frame.",
 			"Controllers": [
 				"Keypad"
 			],

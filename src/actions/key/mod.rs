@@ -297,8 +297,11 @@ impl Key {
 		let me = self.me.clone();
 		let on_change = conn.state.on_change.on(move |change| {
 			let Some(me) = me.upgrade() else { return };
+			// The first "all" draw happens when the key comes online. A later "all", after the
+			// scene list arrives, has to draw again or the live frame never shows.
+			let was_online = me.online();
 			me.refresh_online();
-			if me.online() && *change != Change::All {
+			if me.online() && (*change != Change::All || was_online) {
 				let change = *change;
 				spawn_local(async move {
 					let behavior = me.behavior();

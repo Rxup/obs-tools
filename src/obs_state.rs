@@ -181,6 +181,13 @@ impl ObsState {
 	}
 
 	pub async fn load(&self) {
+		// Keys show "OBS offline" until this is set. Mark the link ready before the scene list,
+		// so a slow stats call cannot leave every key on that picture.
+		{
+			let mut d = self.data.borrow_mut();
+			d.ready = true;
+		}
+		self.on_change.emit(&Change::All);
 		let requests = [
 			"GetSceneList",
 			"GetStudioModeEnabled",
@@ -455,7 +462,12 @@ impl ObsState {
 			};
 			let Some(Value::Object(mut stats)) = pick(results.first()) else { return };
 			let stream = pick(results.get(1)).map(|mut stream| {
-				let kbps = self.bitrate(&stream);
+				// Streamlabs already names its upload speed. OBS only sends the bytes, so the speed is the change between polls.
+				let given = stream.get("kbps").and_then(Value::as_f64).filter(|n| n.is_finite());
+				let kbps = match given {
+					Some(value) => Some(value),
+					None => self.bitrate(&stream),
+				};
 				if let Value::Object(map) = &mut stream {
 					map.insert("kbps".into(), kbps.map_or(Value::Null, js::num));
 				}

@@ -79,11 +79,11 @@ pub static ACTIONS: &[ActionDef] = &[
 		"smartscene",
 		"Smart Scene Switcher",
 		"scene",
-		"Switch scenes. In studio mode: first press to preview, second press to go live. Shows a live picture with a red (live) or green (preview) frame.",
+		"Switch scenes. In studio mode: first press to preview, second press to go live. Shows a live picture with a yellow (live) or green (preview) frame.",
 		&["scene"],
 		[
 			"Smarter Szenenwechsel",
-			"Szene wechseln. Im Studiomodus: erster Druck in die Vorschau, zweiter live. Zeigt ein Live-Bild mit rotem (live) oder grünem (Vorschau) Rahmen.",
+			"Szene wechseln. Im Studiomodus: erster Druck in die Vorschau, zweiter live. Zeigt ein Live-Bild mit gelbem (live) oder grünem (Vorschau) Rahmen.",
 		],
 	),
 	key(

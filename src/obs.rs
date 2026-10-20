@@ -532,6 +532,11 @@ impl ObsClient {
 
 	/// One Streamlabs JSON-RPC call. The id is a number, the pending key is that number as text.
 	pub(crate) fn rpc(&self, method: &str, resource: &str, args: Value) -> Reply {
+		self.rpc_within(method, resource, args, Duration::from_secs(10))
+	}
+
+	/// Same as [`rpc`], with a longer wait. Starting a stream can take more than ten seconds.
+	pub(crate) fn rpc_within(&self, method: &str, resource: &str, args: Value, wait: Duration) -> Reply {
 		let open = self.ws.borrow().as_ref().is_some_and(|s| s.open.get());
 		if !open {
 			return Box::pin(async { Err(Error::from("OBS not connected")) });
@@ -541,7 +546,7 @@ impl ObsClient {
 		let (tx, rx) = oneshot::channel();
 		self.pending.borrow_mut().insert(id.clone(), tx);
 		self.send_rpc(id_num, method, resource, args);
-		let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+		let deadline = tokio::time::Instant::now() + wait;
 		let me = self.me.clone();
 		Box::pin(async move {
 			match tokio::time::timeout_at(deadline, rx).await {

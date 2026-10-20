@@ -11,7 +11,7 @@
 	},
 	"de.felitendo.obs-tools.smartscene": {
 		"Name": "Smarter Szenenwechsel",
-		"Tooltip": "Szene wechseln. Im Studiomodus: erster Druck in die Vorschau, zweiter live. Zeigt ein Live-Bild mit rotem (live) oder grünem (Vorschau) Rahmen."
+		"Tooltip": "Szene wechseln. Im Studiomodus: erster Druck in die Vorschau, zweiter live. Zeigt ein Live-Bild mit gelbem (live) oder grünem (Vorschau) Rahmen."
 	},
 	"de.felitendo.obs-tools.mutetoggle": {
 		"Name": "Quelle stummschalten",

@@ -110,4 +110,5 @@ impl Sd {
 
 pub fn log(message: &str) {
 	println!("[{}] {message}", iso_time(now()));
+	let _ = std::io::Write::flush(&mut std::io::stdout());
 }

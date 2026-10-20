@@ -1,5 +1,7 @@
 // Streamlabs Desktop speaks its own JSON-RPC on port 59650, with a token. The rest of the plugin
 // keeps asking for obs-websocket requests. This translates the ones a key actually needs.
+use std::time::Duration;
+
 use serde_json::{Value, json};
 
 use crate::obs::{ObsClient, Reply};
@@ -38,6 +40,25 @@ pub struct Cache {
 	active_id: String,
 	streaming: String,
 	recording: String,
+	pulse: Pulse,
+	pulse_busy: bool,
+}
+
+/// CPU, bitrate and the stream clock. Streamlabs does not send the obs-websocket stats.
+#[derive(Clone, Debug, Default)]
+struct Pulse {
+	at: i64,
+	cpu: f64,
+	fps: f64,
+	dropped: f64,
+	total: f64,
+	bytes: f64,
+	skipped: f64,
+	encoded: f64,
+	lagged: f64,
+	rendered: f64,
+	stream_time: String,
+	record_time: String,
 }
 
 impl Cache {
@@ -161,7 +182,17 @@ async fn handle(client: &ObsClient, request: &str, data: &Value) -> Res<Value> {
 		"GetVideoSettings" => Ok(json!({ "fpsNumerator": 30, "fpsDenominator": 1 })),
 		"GetProfileList" => Ok(json!({ "currentProfileName": Value::Null, "profiles": [] })),
 		"GetSceneCollectionList" => Ok(json!({ "currentSceneCollectionName": Value::Null, "sceneCollections": [] })),
-		"GetStats" => Ok(json!({})),
+		"GetStats" => {
+			let pulse = cached_pulse(client);
+			Ok(json!({
+				"cpuUsage": pulse.cpu,
+				"activeFps": pulse.fps,
+				"outputSkippedFrames": pulse.skipped,
+				"outputTotalFrames": pulse.encoded,
+				"renderSkippedFrames": pulse.lagged,
+				"renderTotalFrames": pulse.rendered,
+			}))
+		}
 		"GetSceneList" => {
 			refresh_scenes(client).await?;
 			Ok(scene_list(&client.slobs.borrow()))
@@ -230,15 +261,20 @@ async fn handle(client: &ObsClient, request: &str, data: &Value) -> Res<Value> {
 		}
 		"GetStreamStatus" => {
 			refresh_output(client).await?;
-			Ok(output_status(&client.slobs.borrow().streaming))
+			let pulse = cached_pulse(client);
+			Ok(stream_status(&client.slobs.borrow().streaming, &pulse))
 		}
 		"GetRecordStatus" => {
 			refresh_output(client).await?;
-			Ok(output_status(&client.slobs.borrow().recording))
+			let pulse = cached_pulse(client);
+			Ok(record_status(&client.slobs.borrow().recording, &pulse))
 		}
-		"StartStream" => output_command(client, "startStreaming", true).await,
-		"StopStream" => output_command(client, "stopStreaming", true).await,
-		"ToggleStream" => output_command(client, "toggleStreaming", true).await,
+		"StartStream" => stream_command(client, false).await,
+		"StopStream" => stream_command(client, true).await,
+		"ToggleStream" => {
+			refresh_output(client).await?;
+			stream_command(client, output_active(&client.slobs.borrow().streaming)).await
+		}
 		"StartRecord" => output_command(client, "startRecording", false).await,
 		"StopRecord" => output_command(client, "stopRecording", false).await,
 		"ToggleRecord" => output_command(client, "toggleRecording", false).await,
@@ -266,8 +302,38 @@ async fn handle(client: &ObsClient, request: &str, data: &Value) -> Res<Value> {
 	}
 }
 
+/// The key press is the confirmation. Streamlabs otherwise shows a dialog on the stream PC
+/// and waits there, so the stream never starts. The warning is turned back on afterwards.
+async fn stream_command(client: &ObsClient, stopping: bool) -> Res<Value> {
+	let (warning, field) = if stopping {
+		("WarnBeforeStoppingStream", "warnBeforeStoppingStream")
+	} else {
+		("WarnBeforeStartingStream", "warnBeforeStartingStream")
+	};
+	let was_on = warning_on(client, field).await.ok().flatten();
+	if was_on != Some(false) {
+		client.rpc("setSettingValue", "SettingsService", json!(["General", warning, false])).await?;
+	}
+	// No force flag: a logged-in account still has to prepare the stream. Only the dialog is skipped.
+	let started = client.rpc_within("toggleStreaming", "StreamingService", json!([]), Duration::from_secs(60)).await;
+	if was_on == Some(true) {
+		let _ = client.rpc("setSettingValue", "SettingsService", json!(["General", warning, true])).await;
+	}
+	started?;
+	finish_output(client, true).await
+}
+
+async fn warning_on(client: &ObsClient, field: &str) -> Res<Option<bool>> {
+	let settings = client.rpc("settings", "StreamSettingsService", json!([])).await?;
+	Ok(settings.get(field).and_then(Value::as_bool))
+}
+
 async fn output_command(client: &ObsClient, method: &str, stream: bool) -> Res<Value> {
 	client.rpc(method, "StreamingService", json!([])).await?;
+	finish_output(client, stream).await
+}
+
+async fn finish_output(client: &ObsClient, stream: bool) -> Res<Value> {
 	refresh_output(client).await?;
 	let status = {
 		let cache = client.slobs.borrow();
@@ -359,6 +425,8 @@ fn cache_from_scenes(raw: &Value, active: &str, previous: Cache) -> Cache {
 		audio: previous.audio,
 		streaming: previous.streaming,
 		recording: previous.recording,
+		pulse: previous.pulse,
+		pulse_busy: previous.pulse_busy,
 	}
 }
 
@@ -453,8 +521,85 @@ fn output_active(status: &str) -> bool {
 	matches!(status, "live" | "reconnecting" | "starting" | "paused")
 }
 
-fn output_status(status: &str) -> Value {
-	json!({ "outputActive": output_active(status), "outputPaused": status == "paused", "outputTimecode": "00:00:00" })
+fn stream_status(status: &str, pulse: &Pulse) -> Value {
+	json!({
+		"outputActive": output_active(status),
+		"outputPaused": status == "paused",
+		"outputReconnecting": status == "reconnecting",
+		"outputTimecode": pulse.stream_time,
+		"outputSkippedFrames": pulse.dropped,
+		"outputTotalFrames": pulse.total,
+		"outputBytes": pulse.bytes,
+	})
+}
+
+fn record_status(status: &str, pulse: &Pulse) -> Value {
+	json!({
+		"outputActive": output_active(status),
+		"outputPaused": status == "paused",
+		"outputTimecode": pulse.record_time,
+	})
+}
+
+/// The last numbers, and a refresh if they are stale. The refresh does not block the caller:
+/// waiting for it here kept the keys on "OBS offline", so a scene press could not get through.
+fn cached_pulse(client: &ObsClient) -> Pulse {
+	kick_pulse(client);
+	client.slobs.borrow().pulse.clone()
+}
+
+fn kick_pulse(client: &ObsClient) {
+	{
+		let cache = client.slobs.borrow();
+		if cache.pulse_busy || (cache.pulse.at > 0 && crate::js::now() - cache.pulse.at < 800) {
+			return;
+		}
+	}
+	client.slobs.borrow_mut().pulse_busy = true;
+	let Some(me) = client.rc() else {
+		client.slobs.borrow_mut().pulse_busy = false;
+		return;
+	};
+	tokio::task::spawn_local(async move {
+		let pulse = fetch_pulse(&me).await;
+		let mut cache = me.slobs.borrow_mut();
+		cache.pulse = pulse;
+		cache.pulse_busy = false;
+	});
+}
+
+async fn fetch_pulse(client: &ObsClient) -> Pulse {
+	let perf = client.rpc("getModel", "PerformanceService", json!([])).await.unwrap_or(json!({}));
+	let stats = client.rpc("streamingPerformanceStats", "StreamingService", json!([])).await.unwrap_or(json!({}));
+	let stream_time = rpc_text(client, "formattedDurationInCurrentStreamingState").await;
+	let record_time = rpc_text(client, "formattedDurationInCurrentRecordingState").await;
+	Pulse {
+		at: crate::js::now(),
+		cpu: number(&perf, "CPU"),
+		fps: number(&perf, "frameRate"),
+		dropped: number(&stats, "droppedFrames"),
+		total: number(&stats, "totalFrames"),
+		// dataOutput is mebibytes. The speed on the key is the change in bytes between polls.
+		bytes: number(&stats, "dataOutput") * 1024.0 * 1024.0,
+		skipped: number(&perf, "numberSkippedFrames"),
+		encoded: number(&perf, "numberEncodedFrames"),
+		lagged: number(&perf, "numberLaggedFrames"),
+		rendered: number(&perf, "numberRenderedFrames"),
+		stream_time,
+		record_time,
+	}
+}
+
+async fn rpc_text(client: &ObsClient, method: &str) -> String {
+	match client.rpc(method, "StreamingService", json!([])).await {
+		Ok(Value::String(text)) => text,
+		Ok(value) => value.as_str().unwrap_or("").to_string(),
+		Err(_) => String::new(),
+	}
+}
+
+fn number(value: &Value, key: &str) -> f64 {
+	value.get(key).and_then(Value::as_f64).filter(|n| n.is_finite()).unwrap_or(0.0)
 }
 
 fn text_field(data: &Value, key: &str) -> String {
