@@ -54,6 +54,10 @@ struct OutputSettings {
 struct OutputState {
 	time: String,
 	stop_timer: Option<Stop>,
+	/// Ticks since connect. The status call is every third one.
+	ticks: u8,
+	/// Seconds from the last status answer, and when that answer arrived.
+	clock: Option<(f64, i64)>,
 }
 
 struct OutputToggle(&'static OutputConfig);
@@ -68,16 +72,40 @@ impl OutputToggle {
 	}
 
 	async fn tick(&self, k: &KeyRc) -> Res<()> {
-		if !k.visible() || !k.settings::<OutputSettings>().show_timer || !self.active(k) {
+		if !k.visible() {
 			return Ok(());
 		}
-		let status = k.call(self.0.status_request, json!({})).await?;
-		out(k).time = if status["outputPaused"] == true {
-			t("Paused")
-		} else {
-			format_duration(timecode_seconds(status["outputTimecode"].as_str().unwrap_or_default()))
+		let ask = {
+			let mut state = out(k);
+			state.ticks = state.ticks.wrapping_add(1);
+			state.ticks % 3 == 1
 		};
-		if self.active(k) {
+		// A missed push still shows up, but the request goes out every 3 seconds.
+		// Between answers the clock on the key just counts.
+		if ask {
+			let status = k.call(self.0.status_request, json!({})).await?;
+			let active = status["outputActive"] == true;
+			if active && k.settings::<OutputSettings>().show_timer {
+				let mut state = out(k);
+				if status["outputPaused"] == true {
+					state.clock = None;
+					state.time = t("Paused");
+				} else {
+					let secs = timecode_seconds(status["outputTimecode"].as_str().unwrap_or_default());
+					state.clock = Some((secs, js::now()));
+					state.time = format_duration(secs);
+				}
+			}
+			if let Some(state) = k.obs_state() {
+				state.note_output_active(std::ptr::eq(self.0, &STREAM), active);
+			}
+		} else if self.active(k) && k.settings::<OutputSettings>().show_timer {
+			if let Some((secs, at)) = out(k).clock {
+				let passed = (js::now() - at) as f64 / 1000.0;
+				out(k).time = format_duration(secs + passed);
+			}
+		}
+		if self.active(k) && k.settings::<OutputSettings>().show_timer {
 			self.render(k);
 		}
 		Ok(())

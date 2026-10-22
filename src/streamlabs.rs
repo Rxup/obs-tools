@@ -109,6 +109,13 @@ pub fn batch(client: &ObsClient, requests: Vec<Value>) -> Reply<Vec<Value>> {
 	})
 }
 
+/// Output changes are not pushed until something subscribes. One call per signal.
+pub async fn subscribe(client: &ObsClient) {
+	for method in ["streamingStatusChange", "recordingStatusChange"] {
+		let _ = client.rpc(method, "StreamingService", json!([])).await;
+	}
+}
+
 /// A pushed event, with no id. `result._type` is EVENT.
 pub fn on_event(client: &ObsClient, message: &Value) {
 	let event = message.get("result").filter(|value| value["_type"] == "EVENT").or_else(|| message.get("params"));
@@ -518,7 +525,7 @@ fn input_kind(source_id: &str) -> String {
 }
 
 fn output_active(status: &str) -> bool {
-	matches!(status, "live" | "reconnecting" | "starting" | "paused")
+	matches!(status, "live" | "reconnecting" | "starting" | "paused" | "recording")
 }
 
 fn stream_status(status: &str, pulse: &Pulse) -> Value {

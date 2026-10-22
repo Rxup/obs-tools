@@ -598,6 +598,13 @@ impl ObsClient {
 		*self.version.borrow_mut() = Some(version);
 		self.set_status(Status::Connected, "");
 		self.on_connected.emit(&());
+		// Streamlabs sends output changes only after a subscription. Without it the stream key
+		// stays on the picture from the last connect.
+		if let Some(me) = self.rc() {
+			spawn_local(async move {
+				crate::streamlabs::subscribe(&me).await;
+			});
+		}
 	}
 
 	fn fail_slobs_auth(&self, attempt: &Attempt, error: Option<&Value>) {

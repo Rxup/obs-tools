@@ -167,6 +167,23 @@ impl ObsState {
 		f(&self.data.borrow())
 	}
 
+	/// A status poll noticed the stream or the recording change. Keys redraw from the event.
+	pub fn note_output_active(&self, stream: bool, active: bool) {
+		let changed = {
+			let mut d = self.data.borrow_mut();
+			let output = if stream { &mut d.stream } else { &mut d.record };
+			if output.active == active {
+				false
+			} else {
+				output.active = active;
+				true
+			}
+		};
+		if changed {
+			self.on_change.emit(if stream { &Change::Stream } else { &Change::Record });
+		}
+	}
+
 	pub fn update(&self, f: impl FnOnce(&mut Data)) {
 		f(&mut self.data.borrow_mut());
 	}
